@@ -3,25 +3,31 @@
 reset:
     initialize_nes
 
-    lda #0
-    sta timer
-    sta nmi_done
-    jsr sprite_palette_rom_to_ram
+    clear_flag nmi_done
+    copy_via_a #0, timer
+
+    ; copy first set of sprite palettes from ROM to RAM
+    ldx #(16 - 1)
+-   lda sprite_palettes, x  ; in mainloop.asm
+    sta sprite_palette_ram, x
+    dex
+    bpl -
 
     ; fill sprite page with $ff
     ; (it will serve as invisible sprites' Y positions and as negative directions)
     lda #$ff
     ldx #0
--   sta sprite_page, x
+-   sta sprite_data, x
     inx
     bne -
 
     ; sprite tile numbers: all $0a
+    ; regs: X = sprite offset
     ;
     lda #$0a
     ldx #0
     ;
--   sta sprite_page + 1, x
+-   sta sprite_data + 1, x
     inx
     inx
     inx
@@ -30,25 +36,24 @@ reset:
     bne -
 
     ; sprite Y positions: 18 + ball_index * 8
+    ; regs: X = ball offset
     ;
-    ldx #0  ; ball offset on sprite page
+    ldx #0
     ;
 -   txa
-    clc
-    adc #18
-    sta sprite_page, x
-    sta sprite_page + 4, x
+    add #18
+    sta sprite_data, x
+    sta sprite_data + 4, x
     ;
     txa
-    clc
-    adc #8
+    add #8
     tax
     ;
     cpx #(ball_count * 8)
     bne -
 
     ; sprite X positions: left sides from table, add 8 for right sides
-    ; regs: Y = ball index, X = ball offset on sprite page
+    ; regs: Y = ball index, X = ball offset (because 6502 has STA ZP,X), A = position
     ;
     ldy #(ball_count - 1)
     ;
@@ -59,64 +64,60 @@ reset:
     tax
     ;
     lda initial_x, y
-    ;
-    sta sprite_page + 3, x
-    clc
-    adc #8
-    sta sprite_page + 4 + 3, x
+    sta sprite_data + 3, x
+    add #8
+    sta sprite_data + 4 + 3, x
     ;
     dey
     bpl -
 
-    ; sprite attributes
-    ;     horizontal flip:
-    ;         0 for even-numbered sprites (left  half of ball)
-    ;         1 for  odd-numbered sprites (right half of ball)
-    ;     subpalette = ball_index modulo 4
+    ; sprite attributes:
+    ;   - subpalette: ball index modulo 4
+    ;   - horizontal flip: odd sprite indexes (right half of each ball)
+    ; regs: X = sprite offset (because 6502 has STA ZP,X), Y = source offset, A = data
     ;
-    ldy #0
     ldx #0
+--  ldy #0
     ;
+    ; copy attributes of 8 sprites
 -   lda initial_attributes, y
-    sta sprite_page +  0 * 4 + 2, x
-    sta sprite_page +  8 * 4 + 2, x
-    sta sprite_page + 16 * 4 + 2, x
-    sta sprite_page + 24 * 4 + 2, x
-    sta sprite_page + 32 * 4 + 2, x
-    sta sprite_page + 40 * 4 + 2, x
-    ;
+    sta sprite_data + 2, x
     inx
     inx
     inx
     inx
-    ;
     iny
     cpy #8
     bne -
+    ;
+    cpx #(ball_count * 2 * 4)
+    bne --
 
     ; clear some addresses of ball directions (to make them start in different directions)
+    ; regs: X = ball direction offset (because 6502 has STA ZP,X)
     ;
     lda #$00
     ldy #(ball_count - 1)
     ;
 -   ldx directions_to_clear, y
-    sta sprite_page, x
+    sta sprite_data, x
     dey
     bpl -
 
-    wait_vblank_start
-    jsr sprite_palette_ram_to_vram
+    wait_for_vblank_start
 
-    ; do sprite DMA
-    lda #>sprite_page
-    sta oam_dma
+    ; copy sprite palette backwards from RAM to VRAM
+    set_ppu_address $3f10
+    ldx #(16 - 1)
+-   lda sprite_palette_ram, x
+    sta ppu_data
+    dex
+    bpl -
+
+    copy_sprite_data sprite_data
 
     ; set background palette
-    ;
-    lda #$3f
-    ldx #$00
-    jsr set_ppu_address
-    ;
+    set_ppu_address $3f00
     ldx #(4 - 1)
 -   lda background_palette, x
     sta ppu_data
@@ -125,16 +126,14 @@ reset:
 
     ; write name table 0
     ;
-    lda #$20
-    ldx #$00
-    jsr set_ppu_address
+    set_ppu_address $2000
     ;
     ; 1 line (tile $01)
     lda #$01
     ldx #32
     jsr fill_vram
     ;
-    ; 1 line (tiles $02, $03, $04)
+    ; 1 line (tiles: $02, 30 * $03, $04)
     lda #$02
     sta ppu_data
     lda #$03
@@ -143,21 +142,19 @@ reset:
     lda #$04
     sta ppu_data
     ;
-    ; 26 lines (tiles $00, $08, $09)
+    ; 26 lines (tiles on each line: $08, 30 * $00, $09)
     ldy #26
---  lda #$08
+-   lda #$08
     sta ppu_data
     lda #$00
     ldx #30
--   sta ppu_data
-    dex
-    bne -
+    jsr fill_vram
     lda #$09
     sta ppu_data
     dey
-    bne --
+    bne -
     ;
-    ; 1 line (tiles $05, $06, $07)
+    ; 1 line (tiles: $05, 30 * $06, $07)
     lda #$05
     sta ppu_data
     lda #$06
@@ -176,17 +173,17 @@ reset:
     ldx #64
     jsr fill_vram
 
-    jsr reset_ppu_address_and_scroll
+    reset_ppu_address_latch
+    set_ppu_address $0000
+    set_ppu_scroll 0, 0
 
-    wait_vblank_start
+    wait_for_vblank_start
 
     ; enable NMI, use 8*16-pixel sprites
-    lda #%10100000
-    sta ppu_ctrl
+    copy_via_a #%10100000, ppu_ctrl
 
     ; show sprites and background
-    lda #%00011110
-    sta ppu_mask
+    copy_via_a #%00011110, ppu_mask
 
     jmp main_loop
 
@@ -222,6 +219,6 @@ directions_to_clear:
     hex e5 e9 ed f1 f7 fb e3 ea ef f3 f6 fd
 
 background_palette:
-    ; black, dark gray, gray, white (backwards!)
-    hex 30 10 00 0f
+    ; backwards
+    db color_bg3, color_bg2, color_bg1, color_bg0
 

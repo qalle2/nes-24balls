@@ -3,8 +3,8 @@
     ; value to fill unused areas with
     fillvalue $ff
 
+    include "../../nes-util/nes.asm"  ; see readme
     include "constants.asm"
-    include "macros.asm"
 
 ; --- iNES header ---------------------------------------------------------------------------------
 
@@ -13,19 +13,15 @@
     inesmir 0  ; name table mirroring: horizontal
     inesmap 0  ; mapper: NROM
 
-; --------------------------------------------------------------------------------------------------
+; --- PRG ROM -------------------------------------------------------------------------------------
 
-    org $c000                       ; last 16 KiB of PRG ROM
-    pad $f800                       ; last  2 KiB of PRG ROM
+    org $c000               ; last 16 KiB of CPU memory space
     include "init.asm"
     include "mainloop.asm"
+    align $100              ; for speed
     include "nmi.asm"
-    include "common.asm"
-
-; --- Interrupt vectors ---------------------------------------------------------------------------
-
     pad $fffa
-    dw nmi, reset, $ffff
+    dw nmi, reset, $ffff    ; interrupt vectors
 
 ; --- CHR ROM -------------------------------------------------------------------------------------
 
