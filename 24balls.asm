@@ -1,0 +1,441 @@
+; 24 Balls (NES, ASM6)
+; Note: indentation = 12 spaces, maximum length of identifiers = 11 characters.
+
+; --- Constants -----------------------------------------------------------------------------------
+
+; RAM
+spritedata  equ $00    ; see "zero page layout" below
+spritepal   equ $0200  ; sprite palette (16 bytes, backwards)
+timer       equ $0210
+runmainloop equ $0211  ; MSB = main loop allowed to run (0=no, 1=yes)
+loopcounter equ $0212  ; loop counter
+
+; Zero page layout:
+;   $00-$bf: visible sprites:
+;       192 bytes = 24 balls * 2 sprites/ball * 4 bytes/sprite
+;   $c0-$ff: hidden sprites:
+;       Y positions ($c0, $c4, $c8, ...): always $ff
+;       other bytes: directions of balls (negative = up/left, positive = down/right):
+;           horizontal: $c1, $c2, $c3; $c5, $c6, $c7; ...; $dd, $de, $df
+;           vertical:   $e1, $e2, $e3; $e5, $e6, $e7; ...; $fd, $fe, $ff
+
+; memory-mapped registers; see http://wiki.nesdev.com/w/index.php/PPU_registers
+ppuctrl     equ $2000
+ppumask     equ $2001
+ppustatus   equ $2002
+oamaddr     equ $2003
+ppuscroll   equ $2005
+ppuaddr     equ $2006
+ppudata     equ $2007
+dmcfreq     equ $4010
+oamdma      equ $4014
+sndchn      equ $4015
+joypad2     equ $4017
+
+; background colors
+colorbg0    equ $0f  ; background 0 (black)
+colorbg1    equ $00  ; background 1 (dark gray)
+colorbg2    equ $10  ; background 2 (gray)
+colorbg3    equ $30  ; background 3 (white)
+
+; misc
+ballcount   equ 24
+blinkrate   equ  3  ; ball blink rate (0=fastest, 7=slowest)
+
+; --- iNES header ---------------------------------------------------------------------------------
+
+            ; see https://wiki.nesdev.org/w/index.php/INES
+            base $0000
+            db "NES", $1a            ; file id
+            db 1, 1                  ; 16 KiB PRG ROM, 8 KiB CHR ROM
+            db %00000000, %00000000  ; NROM mapper, horizontal name table mirroring
+            pad $0010, $00           ; unused
+
+; --- Start of PRG ROM ----------------------------------------------------------------------------
+
+            base $c000
+            pad $fc00, $ff  ; last 1024 bytes of CPU memory space
+
+; --- Initialization and main loop ----------------------------------------------------------------
+
+macro waitvblank           ; wait until next VBlank starts
+            bit ppustatus
+-           bit ppustatus
+            bpl -
+endm
+
+reset       ; initialize the NES; see http://wiki.nesdev.com/w/index.php/Init_code
+            sei             ; ignore IRQs
+            cld             ; disable decimal mode
+            ldx #%01000000
+            stx joypad2     ; disable APU frame IRQ
+            ldx #$ff
+            txs             ; initialize stack pointer
+            inx
+            stx ppuctrl     ; disable NMI
+            stx ppumask     ; disable rendering
+            stx dmcfreq     ; disable DMC IRQs
+            stx sndchn      ; disable sound channels
+
+            waitvblank
+
+            lda #0           ; clear variables
+            sta timer
+            sta runmainloop
+
+            ldx #(16-1)       ; copy first set of sprite palettes from ROM to RAM
+-           lda spritepals,x
+            sta spritepal,x
+            dex
+            bpl -
+
+            lda #$ff          ; fill sprite page with $ff
+            ldx #0            ; (it will serve as invisible sprites' Y positions
+-           sta spritedata,x  ; and as negative directions)
+            inx
+            bne -
+
+            lda #$0a              ; sprite tile numbers: all $0a
+            ldx #0
+-           sta spritedata+1,x
+            inx
+            inx
+            inx
+            inx
+            cpx #(ballcount*2*4)
+            bne -
+
+            ldx #0              ; sprite Y positions: 18 + ball_index * 8
+-           txa
+            clc
+            adc #18
+            sta spritedata,x
+            sta spritedata+4,x
+            txa
+            clc
+            adc #8
+            tax
+            cpx #(ballcount*8)
+            bne -
+
+            ldy #(ballcount-1)    ; sprite X positions: from table
+-           tya                   ; note: 6502 has STA ZP,X but no STA ZP,Y
+            asl
+            asl
+            asl
+            tax
+            lda initialx,y
+            sta spritedata+3,x
+            clc
+            adc #8
+            sta spritedata+4+3,x
+            dey
+            bpl -
+
+            ldx #0                ; sprite attributes: subpalette = ball index modulo 4,
+--          ldy #0                ; horizontal flip: 1 for odd sprite indexes
+-           lda initialattr,y     ; note: 6502 has STA ZP,X but no STA ZP,Y
+            sta spritedata+2,x
+            inx
+            inx
+            inx
+            inx
+            iny
+            cpy #8
+            bne -
+            cpx #(ballcount*2*4)
+            bne --
+
+            lda #$00            ; clear some ball movement directions to make balls start right
+            ldy #(ballcount-1)  ; instead of left
+-           ldx initrightmv,y   ; note: 6502 has STA ZP,X but no STA ZP,Y
+            sta spritedata,x
+            dey
+            bpl -
+
+            waitvblank
+
+            lda #$3f         ; set background palette
+            sta ppuaddr
+            ldx #$00
+            stx ppuaddr
+-           lda bgpalette,x
+            sta ppudata
+            inx
+            cpx #16
+            bne -
+
+            ; TODO: continue tidying up from here
+
+            lda #$20       ; write name table 0
+            sta ppuaddr
+            lda #$00
+            sta ppuaddr
+            lda #$01       ; 1 line: tile $01
+            ldx #32
+            jsr fillvram
+            lda #$02       ; 1 line: tiles $02, 30 * $03, $04
+            sta ppudata
+            lda #$03
+            ldx #30
+            jsr fillvram
+            lda #$04
+            sta ppudata
+            ldy #26       ; 26 lines: tiles $08, 30 * $00, $09
+-           lda #$08
+            sta ppudata
+            lda #$00
+            ldx #30
+            jsr fillvram
+            lda #$09
+            sta ppudata
+            dey
+            bne -
+            lda #$05       ; 1 line: tiles $05, 30 * $06, $07
+            sta ppudata
+            lda #$06
+            ldx #30
+            jsr fillvram
+            lda #$07
+            sta ppudata
+            lda #$01       ; 1 line: tile $01
+            ldx #32
+            jsr fillvram
+
+            ; clear attribute table 0
+            lda #$00
+            ldx #64
+            jsr fillvram
+
+            bit ppustatus  ; reset ppuaddr/ppuscroll latch
+            lda #$00        ; reset PPU address and scroll
+            sta ppuaddr
+            sta ppuaddr
+            sta ppuscroll
+            sta ppuscroll
+
+            waitvblank
+
+            lda #%10100000  ; enable NMI, use 8*16-pixel sprites
+            sta ppuctrl
+            lda #%00011110  ; show sprites and background
+            sta ppumask
+
+mainloop    bit runmainloop
+            bpl mainloop
+
+            ; move balls horizontally (all balls on even frames, all except last 8 on odd frames)
+            ;
+            ldx #(ballcount-1)
+            lda timer
+            and #%00000001
+            beq +
+            ldx #(ballcount-8-1)
++           stx loopcounter
+            ;
+horizontal_move_loop
+            ldx loopcounter
+            ;
+            ; direction address -> Y
+            ldy horizontal_direction_addresses,x
+            ;
+            ; offset in sprite data -> X
+            txa
+            asl
+            asl
+            asl
+            tax
+            ;
+            ; get current direction
+            lda $00,y
+            bpl move_right
+            ;
+            ; move both halves left; if hit left wall, change direction
+            dec spritedata+3,x
+            dec spritedata+4+3,x
+            lda spritedata+3,x
+            cmp #8
+            bne horizontal_loop_end
+            lda #$00
+            sta $00,y
+            jmp horizontal_loop_end
+            ;
+move_right
+            ; move both halves right; if hit right wall, change direction
+            inc spritedata+3,x
+            inc spritedata+4+3,x
+            lda spritedata+3,x
+            cmp #(256-16-8)
+            bne horizontal_loop_end
+            lda #$ff
+            sta $00,y
+            ;
+horizontal_loop_end
+            dec loopcounter
+            bpl horizontal_move_loop
+
+            ; move balls vertically (very similar to previous loop)
+            ;
+            lda #(ballcount-1)
+            sta loopcounter
+            ;
+vertical_move_loop
+            ldx loopcounter
+            ;
+            ; direction address -> Y
+            ldy vertical_direction_addresses,x
+            ;
+            ; offset in sprite data -> X
+            txa
+            asl
+            asl
+            asl
+            tax
+            ;
+            ; get current direction
+            lda $00,y
+            bpl move_down
+            ;
+            ; move both halves up; if hit top wall, change direction
+            dec spritedata+0,x
+            dec spritedata+4+0,x
+            lda spritedata+0,x
+            cmp #(16-1)
+            bne vertical_loop_end
+            lda #$00
+            sta $00,y
+            jmp vertical_loop_end
+            ;
+move_down
+            ; move both halves down; if hit bottom wall, change direction
+            inc spritedata+0,x
+            inc spritedata+4+0,x
+            lda spritedata+0,x
+            cmp #(240-16-16-1)
+            bne vertical_loop_end
+            lda #$ff
+            sta $00,y
+            ;
+vertical_loop_end
+            dec loopcounter
+            bpl vertical_move_loop
+
+            jsr sprite_palette_rom_to_ram
+            inc timer
+            lsr runmainloop  ; clear flag
+
+            jmp mainloop
+
+fillvram    sta ppudata  ; write A to VRAM X times
+            dex
+            bne fillvram
+            rts
+
+initialx    ; initial X positions for balls
+            ; minimum: 8 + 1 = 9
+            ; maximum: 256 - 16 - 8 - 1 = 231
+            ; Python 3: " ".join(format(n, "02x") for n in random.sample(range(9, 231 + 1), 24))
+            hex 48 59 32 96 93 c6 26 70
+            hex 31 d5 73 e6 3a 34 8c 52
+            hex 1c 3d 61 c5 9e 88 b9 e7
+
+initialattr ; initial attributes for balls
+            db %00000000, %01000000  ; subpalette 0, left/right half of ball
+            db %00000001, %01000001  ; subpalette 1, left/right half of ball
+            db %00000010, %01000010  ; subpalette 2, left/right half of ball
+            db %00000011, %01000011  ; subpalette 3, left/right half of ball
+
+initrightmv ; balls that initially move right instead of left
+            hex c5 c9 cd d1 d7 db c1 c7 ce d5 d9 df
+            hex e5 e9 ed f1 f7 fb e3 ea ef f3 f6 fd
+
+bgpalette   ; background palette
+            db colorbg0, colorbg1, colorbg2, colorbg3  ; screen border
+            db colorbg0, colorbg0, colorbg0, colorbg0  ; unused
+            db colorbg0, colorbg0, colorbg0, colorbg0  ; unused
+            db colorbg0, colorbg0, colorbg0, colorbg0  ; unused
+
+horizontal_direction_addresses
+            hex  c1 c2 c3  c5 c6 c7  c9 ca cb  cd ce cf
+            hex  d1 d2 d3  d5 d6 d7  d9 da db  dd de df
+
+vertical_direction_addresses
+            hex  e1 e2 e3  e5 e6 e7  e9 ea eb  ed ee ef
+            hex  f1 f2 f3  f5 f6 f7  f9 fa fb  fd fe ff
+
+sprite_palette_rom_to_ram
+            ; Depending on timer, copy one of two sprite palettes from ROM to RAM.
+            ; Args: none
+
+            ldx #16              ; spritepals offset (0/16) -> X
+            lda timer
+            and #(1<<blinkrate)
+            bne +
+            tax
++           ldy #(16-1)          ; copy 16 bytes starting from X
+-           lda spritepals,x
+            sta spritepal,y
+            inx
+            dey
+            bpl -
+
+            rts
+
+spritepals  ; sprite palettes
+            ; shades of blue, red, yellow and green
+            db colorbg0, $11, $21, $31
+            db colorbg0, $14, $24, $34
+            db colorbg0, $17, $27, $37
+            db colorbg0, $1a, $2a, $3a
+            ; slightly different shades of blue, red, yellow and green
+            db colorbg0, $12, $22, $32
+            db colorbg0, $15, $25, $35
+            db colorbg0, $18, $28, $38
+            db colorbg0, $1b, $2b, $3b
+
+; --- Interrupt routines --------------------------------------------------------------------------
+
+nmi         pha                ; push A, X (note: not Y)
+            txa
+            pha
+            lda #$00          ; do OAM DMA
+            sta oamaddr
+            lda #>spritedata
+            sta oamdma
+
+            ; copy sprite palette backwards from RAM to VRAM
+            lda #$3f
+            sta ppuaddr
+            lda #$10
+            sta ppuaddr
+            ldx #15
+-           lda spritepal,x
+            sta ppudata
+            dex
+            bpl -
+
+            bit ppustatus  ; reset ppuaddr/ppuscroll latch
+            lda #$00        ; reset PPU address and scroll
+            sta ppuaddr
+            sta ppuaddr
+            sta ppuscroll
+            sta ppuscroll
+
+            sec              ; set flag to let main loop run once
+            ror runmainloop
+            pla              ; pull X, A
+            tax
+            pla
+
+irq         rti
+
+; --- Interrupt vectors----------------------------------------------------------------------------
+
+            pad $fffa, $ff
+            dw nmi, reset, irq  ; note: IRQ unused
+
+; --- CHR ROM -------------------------------------------------------------------------------------
+
+            base $0000
+            incbin "chr.bin"
+            pad $2000, $ff
