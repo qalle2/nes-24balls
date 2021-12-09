@@ -39,7 +39,7 @@ colorbg2    equ $10  ; background 2 (gray)
 colorbg3    equ $30  ; background 3 (white)
 
 ; screen border tiles
-tilborderf  equ $00  ; border - full
+tilborderfu equ $01  ; border - full
 tilbordertl equ $02  ; border - top left
 tilbordert  equ $03  ; border - top
 tilbordertr equ $04  ; border - top right
@@ -174,63 +174,39 @@ reset       ; initialize the NES; see http://wiki.nesdev.com/w/index.php/Init_co
             lda #$00
             sta ppuaddr
             tax
+            ldy #4
 -           sta ppudata
-            sta ppudata
-            sta ppudata
-            sta ppudata
             inx
             bne -
+            dey
+            bne -
 
-            lda #$20          ; write first two rows of name table 0
+            ; extract run-length encoded data to name table 0
+            ldx #$ff         ; source index
+--          inx
+            lda ntrledata,x  ; address high (0 = terminator)
+            beq +
             sta ppuaddr
-            lda #$00
+            inx
+            lda ntrledata,x  ; address low
             sta ppuaddr
-            lda #tilborderf
-            ldx #32
-            jsr fillvram
-            lda #tilbordertl
-            sta ppudata
-            lda #tilbordert
-            ldx #30
-            jsr fillvram
-            lda #tilbordertr
-            sta ppudata
+            inx
+            lda ntrledata,x  ; LLLLLLLV (LLLLLLL = length, V = vertical)
+            lsr a
+            tay              ; length
+            lda #0
+            rol a
+            asl a
+            asl a
+            sta ppuctrl      ; address autoincrement (%00000000 = 1 byte, %00000100 = 32 bytes)
+            inx
+            lda ntrledata,x  ; tile
+-           sta ppudata      ; write tile Y times
+            dey
+            bne -
+            beq --           ; next RLE block (unconditional)
 
-            lda #$23          ; write last two rows of name table 0
-            sta ppuaddr
-            lda #$80
-            sta ppuaddr
-            lda #tilborderbl
-            sta ppudata
-            lda #tilborderb
-            ldx #30
-            jsr fillvram
-            lda #tilborderbr
-            sta ppudata
-            lda #tilborderf
-            ldx #32
-            jsr fillvram
-
-            lda #%00000100  ; address increment mode: 32 bytes
-            sta ppuctrl
-
-            lda #$20         ; write leftmost column of name table 0
-            sta ppuaddr
-            lda #$40
-            sta ppuaddr
-            lda #tilborderl
-            ldx #26
-            jsr fillvram
-
-            lda #$20         ; write rightmost column of name table 0
-            sta ppuaddr
-            lda #$5f
-            sta ppuaddr
-            lda #tilborderr
-            ldx #26
-            jsr fillvram
-
-            bit ppustatus  ; reset ppuaddr/ppuscroll latch
++           bit ppustatus  ; reset ppuaddr/ppuscroll latch
             lda #$00       ; reset PPU address and scroll
             sta ppuaddr
             sta ppuaddr
@@ -272,10 +248,22 @@ bgpalette   ; background palette
             db colorbg0, colorbg0, colorbg0, colorbg0  ; unused
             db colorbg0, colorbg0, colorbg0, colorbg0  ; unused
 
-fillvram    sta ppudata   ; write A to VRAM X times
-            dex
-            bne fillvram
-            rts
+ntrledata   ; name table RLE data; 1 run = 4 bytes:
+            ; - address high (0 = terminator)
+            ; - address low
+            ; - LLLLLLLV (LLLLLLL = length, V = vertical)
+            ; - tile
+            db $20, $00, 32*2+0, tilborderfu  ; first row (invisible)
+            db $20, $20,  1*2+0, tilbordertl  ; border - top left
+            db $20, $21, 30*2+0, tilbordert   ; border - top
+            db $20, $3f,  1*2+0, tilbordertr  ; border - top right
+            db $20, $40, 26*2+1, tilborderl   ; border - left
+            db $20, $5f, 26*2+1, tilborderr   ; border - right
+            db $23, $80,  1*2+0, tilborderbl  ; border - bottom left
+            db $23, $81, 30*2+0, tilborderb   ; border - bottom
+            db $23, $9f,  1*2+0, tilborderbr  ; border - bottom right
+            db $23, $a0, 32*2+0, tilborderfu  ; last row (invisible)
+            db $00
 
 ; --- Main loop -----------------------------------------------------------------------------------
 
@@ -381,13 +369,15 @@ spritepals  ; first set of sprite palettes (blue, red, yellow and green)
 
 ; --- Interrupt routines --------------------------------------------------------------------------
 
-nmi         pha              ; push A, X (note: not Y)
+nmi         pha  ; push A, X (note: not Y)
             txa
             pha
-            lda #$00         ; do OAM DMA
+
+            lda #$00       ; do OAM DMA
             sta oamaddr
             lda #>sprdata
             sta oamdma
+
             lda #$3f         ; copy sprite palette backwards from RAM to VRAM
             sta ppuaddr
             lda #$10
@@ -397,20 +387,24 @@ nmi         pha              ; push A, X (note: not Y)
             sta ppudata
             dex
             bpl -
-            bit ppustatus    ; reset ppuaddr/ppuscroll latch
-            lda #$00         ; reset PPU address and scroll
+
+            bit ppustatus  ; reset ppuaddr/ppuscroll latch
+            lda #$00       ; reset PPU address and scroll
             sta ppuaddr
             sta ppuaddr
             sta ppuscroll
             sta ppuscroll
+
             sec              ; set flag to let main loop run once
             ror runmainloop
-            pla              ; pull X, A
+
+            pla  ; pull X, A
             tax
             pla
-irq         rti              ; end interrupt routines; note: IRQ unused
 
-; --- Interrupt vectors----------------------------------------------------------------------------
+irq         rti  ; end interrupt routines; note: IRQ unused
+
+; --- Interrupt vectors ---------------------------------------------------------------------------
 
             pad $fffa, $ff
             dw nmi, reset, irq  ; note: IRQ unused
