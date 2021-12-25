@@ -19,7 +19,7 @@ blinktimer  equ $0212  ; ball blink timer
 ;           horizontal: $c1, $c2, $c3; $c5, $c6, $c7; ...; $dd, $de, $df
 ;           vertical:   $e1, $e2, $e3; $e5, $e6, $e7; ...; $fd, $fe, $ff
 
-; memory-mapped registers; see http://wiki.nesdev.com/w/index.php/PPU_registers
+; memory-mapped registers; see https://wiki.nesdev.org/w/index.php/PPU_registers
 ppuctrl     equ $2000
 ppumask     equ $2001
 ppustatus   equ $2002
@@ -70,7 +70,7 @@ blinkrate   equ  3  ; ball blink rate (0=fastest, 7=slowest)
 
 ; --- Initialization ------------------------------------------------------------------------------
 
-reset       ; initialize the NES; see http://wiki.nesdev.com/w/index.php/Init_code
+reset       ; initialize the NES; see https://wiki.nesdev.org/w/index.php/Init_code
             sei             ; ignore IRQs
             cld             ; disable decimal mode
             ldx #%01000000
