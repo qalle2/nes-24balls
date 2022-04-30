@@ -1,5 +1,5 @@
 # 24 Balls
-A demo for the [NES](https://en.wikipedia.org/wiki/Nintendo_Entertainment_System). Shows 24 bouncing balls. No sound. Tested on Mednafen and FCEUX.
+A demo for the [NES](https://en.wikipedia.org/wiki/Nintendo_Entertainment_System). Shows 24 bouncing balls. Tested on Mednafen and FCEUX.
 
 ![screenshot](snap.png)
 

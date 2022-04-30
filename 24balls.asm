@@ -8,6 +8,10 @@
 ; - within a block of instructions, comments start at 2 columns after longest instruction,
 ;   but not earlier than at 41st column (equ is an exception)
 
+; TODO:
+; - the sounds sound really bad (study NES audio more)
+; - use LFSR or other PRNG for initial values
+
 ; --- Constants -----------------------------------------------------------------------------------
 
 ; RAM
@@ -34,6 +38,14 @@ oam_addr        equ $2003
 ppu_scroll      equ $2005
 ppu_addr        equ $2006
 ppu_data        equ $2007
+sq1_vol         equ $4000
+sq1_sweep       equ $4001
+sq1_lo          equ $4002
+sq1_hi          equ $4003
+sq2_vol         equ $4004
+sq2_sweep       equ $4005
+sq2_lo          equ $4006
+sq2_hi          equ $4007
 dmc_freq        equ $4010
 oam_dma         equ $4014
 snd_chn         equ $4015
@@ -47,8 +59,8 @@ col_bg3         equ $30  ; white
 
 ; misc
 ball_tile       equ $0a  ; ball tile (top left quarter; bottom left must immediately follow)
-ball_count      equ  24 ; number of balls
-blink_rate      equ   3 ; ball blink rate (0=fastest, 7=slowest)
+ball_count      equ  24  ; number of balls
+blink_rate      equ   3  ; ball blink rate (0=fastest, 7=slowest)
 
 ; --- iNES header ---------------------------------------------------------------------------------
 
@@ -75,13 +87,23 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
                 stx ppu_ctrl            ; disable NMI
                 stx ppu_mask            ; disable rendering
                 stx dmc_freq            ; disable DMC IRQs
-                stx snd_chn             ; disable sound channels
 
                 jsr wait_vbl_start      ; wait until next VBlank starts
 
-                lda #0                  ; clear variables
-                sta run_main_loop
+                lda #0                  ; clear variables and set sound registers
+                sta run_main_loop       ; see https://www.nesdev.org/wiki/APU_Pulse
                 sta frame_count
+                sta sq1_sweep
+                sta sq2_sweep
+                sta sq1_lo
+                sta sq2_lo
+                sta sq1_hi
+                sta sq2_hi
+                lda #%00000011          ; enable pulse channels
+                sta snd_chn
+                lda #%10000010          ; duty cycle 50%, vol/env div period 2?
+                sta sq1_vol
+                sta sq2_vol
 
                 lda #$ff                ; fill sprite page with $ff (it will serve as invisible
                 ldx #0                  ; sprites' Y positions and as negative directions)
@@ -195,12 +217,7 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
                 beq --                  ; next RLE block (unconditional)
 
 +               jsr wait_vbl_start      ; wait until next VBlank starts
-
-                lda #$00                ; reset PPU scroll
-                sta ppu_scroll
-                sta ppu_scroll
-                lda #%10100000          ; enable NMI, use 8*16-pixel sprites
-                sta ppu_ctrl
+                jsr set_ppu_regs        ; set ppu_scroll and ppu_ctrl
                 lda #%00011110          ; show sprites and background
                 sta ppu_mask
 
@@ -213,6 +230,13 @@ wait_vbl_start  bit ppu_status          ; wait until next VBlank starts
 
 set_ppu_addr    sty ppu_addr            ; set PPU address from Y and A
                 sta ppu_addr
+                rts
+
+set_ppu_regs    lda #$00                ; set ppu_scroll and ppu_ctrl
+                sta ppu_scroll
+                sta ppu_scroll
+                lda #%10100000          ; enable NMI, use 8*16-pixel sprites
+                sta ppu_ctrl
                 rts
 
 init_spr_attr   ; initial attributes for balls
@@ -290,19 +314,23 @@ main_loop       bit run_main_loop       ; wait until NMI routine has set flag
                 tax
                 lda spr_data,y          ; get direction
                 bpl +
-                dec spr_data+3,x        ; move left; if hit wall, change direction
+                dec spr_data+3,x        ; move left; if hit wall, change direction & play sound
                 dec spr_data+4+3,x
                 lda spr_data+3,x
                 cmp #8
                 bne ++
+                lda #%00000011          ; timer high = 3?
+                sta sq1_hi
                 lda #$00
                 sta spr_data,y
-                jmp ++
-+               inc spr_data+3,x        ; move right; if hit wall, change direction
+                beq ++                  ; unconditional
++               inc spr_data+3,x        ; move right; if hit wall, change direction & play sound
                 inc spr_data+4+3,x
                 lda spr_data+3,x
                 cmp #(256-16-8)
                 bne ++
+                lda #%00000011          ; timer high = 3?
+                sta sq1_hi
                 lda #$ff
                 sta spr_data,y
 ++              dec loop_counter
@@ -320,19 +348,23 @@ main_loop       bit run_main_loop       ; wait until NMI routine has set flag
                 tax
                 lda spr_data,y          ; get direction
                 bpl +
-                dec spr_data+0,x        ; move up; if hit wall, change direction
+                dec spr_data+0,x        ; move up; if hit wall, change direction & play sound
                 dec spr_data+4+0,x
                 lda spr_data+0,x
                 cmp #(16-1)
                 bne ++
+                lda #%00000011          ; timer high = 3?
+                sta sq2_hi
                 lda #$00
                 sta spr_data,y
-                jmp ++
-+               inc spr_data+0,x        ; move down; if hit wall, change direction
+                beq ++                  ; unconditional
++               inc spr_data+0,x        ; move down; if hit wall, change direction & play sound
                 inc spr_data+4+0,x
                 lda spr_data+0,x
                 cmp #(240-16-16-1)
                 bne ++
+                lda #%00000011          ; timer high = 3?
+                sta sq2_hi
                 lda #$ff
                 sta spr_data,y
 ++              dec loop_counter
@@ -392,11 +424,7 @@ nmi             pha                     ; push A, X, Y
                 bpl -
 
                 bit ppu_status          ; reset ppu_addr/ppu_scroll latch
-                lda #$00                ; reset PPU scroll
-                sta ppu_scroll
-                sta ppu_scroll
-                lda #%10100000          ; same value as in initialization
-                sta ppu_ctrl
+                jsr set_ppu_regs        ; set ppu_scroll and ppu_ctrl
 
                 sec                     ; set MSB to let main loop run once
                 ror run_main_loop
