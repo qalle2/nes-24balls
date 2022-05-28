@@ -1,25 +1,16 @@
 ; 24 Balls (NES, ASM6)
-; Style:
-; - ASCII
-; - no tabs
-; - lines: 100 characters or less (incl. newline)
-; - identifiers: 15 characters or less
-; - instructions start at 17th column
-; - within a block of instructions, comments start at 2 columns after longest instruction,
-;   but not earlier than at 41st column (equ is an exception)
 
 ; TODO:
-; - the sounds sound really bad (study NES audio more)
 ; - use LFSR or other PRNG for initial values
 
 ; --- Constants -----------------------------------------------------------------------------------
 
 ; RAM
 spr_data        equ $00    ; sprite data; see "zero page layout" below
-spr_pal         equ $0200  ; sprite palette (16 bytes, backwards)
-run_main_loop   equ $0210  ; MSB = main loop allowed to run (0=no, 1=yes)
-loop_counter    equ $0211  ; loop counter
-frame_count     equ $0212
+run_main_loop   equ $0200  ; main loop allowed to run? (MSB: 0=no, 1=yes)
+loop_counter    equ $0201  ; loop counter
+frame_count     equ $0202  ; frame counter
+spr_pal_ind     equ $0203  ; index to start copying sprite palette from (0/16)
 
 ; Zero page layout:
 ;   $00-$bf: visible sprites:
@@ -38,14 +29,6 @@ oam_addr        equ $2003
 ppu_scroll      equ $2005
 ppu_addr        equ $2006
 ppu_data        equ $2007
-sq1_vol         equ $4000
-sq1_sweep       equ $4001
-sq1_lo          equ $4002
-sq1_hi          equ $4003
-sq2_vol         equ $4004
-sq2_sweep       equ $4005
-sq2_lo          equ $4006
-sq2_hi          equ $4007
 dmc_freq        equ $4010
 oam_dma         equ $4014
 snd_chn         equ $4015
@@ -77,6 +60,7 @@ blink_rate      equ   3  ; ball blink rate (0=fastest, 7=slowest)
                 pad $fc00, $ff          ; last 1 KiB of CPU address space
 
 reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/Init_code
+                ;
                 sei                     ; ignore IRQs
                 cld                     ; disable decimal mode
                 ldx #%01000000
@@ -87,27 +71,19 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
                 stx ppu_ctrl            ; disable NMI
                 stx ppu_mask            ; disable rendering
                 stx dmc_freq            ; disable DMC IRQs
+                stx snd_chn             ; disable sound channels
 
                 jsr wait_vbl_start      ; wait until next VBlank starts
-
-                lda #0                  ; clear variables and set sound registers
-                sta run_main_loop       ; see https://www.nesdev.org/wiki/APU_Pulse
-                sta frame_count
-                sta sq1_sweep
-                sta sq2_sweep
-                sta sq1_lo
-                sta sq2_lo
-                sta sq1_hi
-                sta sq2_hi
-                lda #%00000011          ; enable pulse channels
-                sta snd_chn
-                lda #%10000010          ; duty cycle 50%, vol/env div period 2?
-                sta sq1_vol
-                sta sq2_vol
 
                 lda #$ff                ; fill sprite page with $ff (it will serve as invisible
                 ldx #0                  ; sprites' Y positions and as negative directions)
 -               sta spr_data,x
+                inx
+                bne -
+
+                lda #$00                ; clear variables page
+                tax
+-               sta $0200,x
                 inx
                 bne -
 
@@ -171,19 +147,19 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
 
                 jsr wait_vbl_start      ; wait until next VBlank starts
 
-                ldy #$3f                ; set background palette
-                lda #$00
-                jsr set_ppu_addr        ; Y, A -> address
+                ldy #$3f                ; set background palette (while in VBlank)
+                jsr set_ppu_addr_pg     ; 0 -> A; set PPU address page from Y
+                ;
                 tax
--               lda bg_pal,x
+-               lda bg_palette,x
                 sta ppu_data
                 inx
-                cpx #16
+                cpx #4
                 bne -
 
-                ldy #$20                ; clear name table 0 and attribute table 0
-                lda #$00
-                jsr set_ppu_addr        ; Y, A -> address
+                ldy #$20                ; clear name & attribute table 0
+                jsr set_ppu_addr_pg     ; 0 -> A; set PPU address page from Y
+                ;
                 tax
                 ldy #4
 -               sta ppu_data
@@ -193,14 +169,17 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
                 bne -
 
                 ; extract run-length encoded data to name table 0
-                ldx #$ff                ; source index
---              inx
-                ldy nt_rle_data,x       ; address high (0 = terminator)
+                ;
+                ldx #$ff                ; source index (preincremented)
+                ;
+--              inx                     ; PPU address ($00xx = terminator)
+                ldy nt_rle_data,x
                 beq +
                 inx
-                lda nt_rle_data,x       ; address low
+                lda nt_rle_data,x
                 jsr set_ppu_addr        ; Y, A -> address
-                inx
+                ;
+                inx                     ; length & direction
                 lda nt_rle_data,x       ; LLLLLLLV (LLLLLLL = length, V = vertical)
                 lsr a
                 tay                     ; length
@@ -208,35 +187,24 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
                 rol a
                 asl a
                 asl a
-                sta ppu_ctrl            ; address autoincrement
-                inx                     ; (%00000000 = 1 byte, %00000100 = 32 bytes)
-                lda nt_rle_data,x       ; tile
--               sta ppu_data            ; write tile Y times
+                sta ppu_ctrl            ; address autoincrement (%000 = 1 byte, %100 = 32 bytes)
+                ;
+                inx                     ; write tile Y times
+                lda nt_rle_data,x
+-               sta ppu_data
                 dey
                 bne -
+                ;
                 beq --                  ; next RLE block (unconditional)
 
 +               jsr wait_vbl_start      ; wait until next VBlank starts
-                jsr set_ppu_regs        ; set ppu_scroll and ppu_ctrl
-                lda #%00011110          ; show sprites and background
-                sta ppu_mask
+                jsr set_ppu_regs        ; set ppu_scroll/ppu_ctrl/ppu_mask
 
                 jmp main_loop
 
 wait_vbl_start  bit ppu_status          ; wait until next VBlank starts
 -               bit ppu_status
                 bpl -
-                rts
-
-set_ppu_addr    sty ppu_addr            ; set PPU address from Y and A
-                sta ppu_addr
-                rts
-
-set_ppu_regs    lda #$00                ; set ppu_scroll and ppu_ctrl
-                sta ppu_scroll
-                sta ppu_scroll
-                lda #%10100000          ; enable NMI, use 8*16-pixel sprites
-                sta ppu_ctrl
                 rts
 
 init_spr_attr   ; initial attributes for balls
@@ -257,11 +225,7 @@ init_inv_dirs   ; balls that initially move right/down instead of left/up
                 hex c5 c9 cd d1 d7 db c1 c7 ce d5 d9 df
                 hex e5 e9 ed f1 f7 fb e3 ea ef f3 f6 fd
 
-bg_pal          ; background palette
-                db col_bg0, col_bg1, col_bg2, col_bg3  ; screen border
-                db col_bg0, col_bg0, col_bg0, col_bg0  ; unused
-                db col_bg0, col_bg0, col_bg0, col_bg0  ; unused
-                db col_bg0, col_bg0, col_bg0, col_bg0  ; unused
+bg_palette      db col_bg0, col_bg1, col_bg2, col_bg3  ; 1st background subpalette
 
 macro rle_run _y, _x, _length, _vertical, _tile
                 ; RLE run (see nt_rle_data)
@@ -314,32 +278,33 @@ main_loop       bit run_main_loop       ; wait until NMI routine has set flag
                 tax
                 lda spr_data,y          ; get direction
                 bpl +
-                dec spr_data+3,x        ; move left; if hit wall, change direction & play sound
+                ;
+                dec spr_data+3,x        ; move left; if hit wall, change direction
                 dec spr_data+4+3,x
                 lda spr_data+3,x
                 cmp #8
                 bne ++
-                lda #%00000011          ; timer high = 3?
-                sta sq1_hi
                 lda #$00
                 sta spr_data,y
                 beq ++                  ; unconditional
-+               inc spr_data+3,x        ; move right; if hit wall, change direction & play sound
+                ;
++               inc spr_data+3,x        ; move right; if hit wall, change direction
                 inc spr_data+4+3,x
                 lda spr_data+3,x
                 cmp #(256-16-8)
                 bne ++
-                lda #%00000011          ; timer high = 3?
-                sta sq1_hi
                 lda #$ff
                 sta spr_data,y
+                ;
 ++              dec loop_counter
                 bpl -
 
                 ; move all balls vertically
+                ;
                 lda #(ball_count-1)
                 sta loop_counter
--               ldx loop_counter        ; start loop
+                ;
+-               ldx loop_counter
                 ldy v_dir_addrs,x       ; direction address -> Y
                 txa                     ; offset in sprite data -> X
                 asl a
@@ -348,40 +313,33 @@ main_loop       bit run_main_loop       ; wait until NMI routine has set flag
                 tax
                 lda spr_data,y          ; get direction
                 bpl +
-                dec spr_data+0,x        ; move up; if hit wall, change direction & play sound
+                ;
+                dec spr_data+0,x        ; move up; if hit wall, change direction
                 dec spr_data+4+0,x
                 lda spr_data+0,x
                 cmp #(16-1)
                 bne ++
-                lda #%00000011          ; timer high = 3?
-                sta sq2_hi
                 lda #$00
                 sta spr_data,y
                 beq ++                  ; unconditional
-+               inc spr_data+0,x        ; move down; if hit wall, change direction & play sound
+                ;
++               inc spr_data+0,x        ; move down; if hit wall, change direction
                 inc spr_data+4+0,x
                 lda spr_data+0,x
                 cmp #(240-16-16-1)
                 bne ++
-                lda #%00000011          ; timer high = 3?
-                sta sq2_hi
                 lda #$ff
                 sta spr_data,y
+                ;
 ++              dec loop_counter
                 bpl -
 
-                ; according to timer, copy one of two sprite palettes backwards from ROM to RAM
-                ldx #16                 ; source offset (0/16) -> X
+                ldx #16                 ; which index to start copying sprite palette from (0/16)
                 lda frame_count
                 and #(1<<blink_rate)
                 bne +
                 tax
-+               ldy #(16-1)
--               lda spr_pals,x
-                sta spr_pal,y
-                inx
-                dey
-                bpl -
++               stx spr_pal_ind
 
                 inc frame_count         ; advance timer
                 jmp main_loop
@@ -409,22 +367,25 @@ nmi             pha                     ; push A, X, Y
                 pha
 
                 bit ppu_status          ; reset ppu_addr/ppu_scroll latch
+
                 lda #$00                ; do OAM DMA
                 sta oam_addr
                 lda #>spr_data
                 sta oam_dma
 
-                ldy #$3f                ; copy sprite palette backwards from RAM to VRAM
+                ldy #$3f                ; copy one of two sprite palettes to VRAM
                 lda #$10
                 jsr set_ppu_addr        ; Y, A -> address
-                ldx #(16-1)
--               lda spr_pal,x
+                ;
+                ldx spr_pal_ind         ; X = source index
+                tay                     ; Y = bytes left
+-               lda spr_pals,x
                 sta ppu_data
-                dex
-                bpl -
+                inx
+                dey
+                bne -
 
-                bit ppu_status          ; reset ppu_addr/ppu_scroll latch
-                jsr set_ppu_regs        ; set ppu_scroll and ppu_ctrl
+                jsr set_ppu_regs        ; set ppu_scroll/ppu_ctrl/ppu_mask
 
                 sec                     ; set MSB to let main loop run once
                 ror run_main_loop
@@ -435,7 +396,23 @@ nmi             pha                     ; push A, X, Y
                 tax
                 pla
 
-irq             rti
+irq             rti                     ; note: IRQ unused
+
+; --- Subs used in many places --------------------------------------------------------------------
+
+set_ppu_addr_pg lda #$00                ; 0 -> A; set PPU address page from Y
+set_ppu_addr    sty ppu_addr            ; set PPU address from Y and A
+                sta ppu_addr
+                rts
+
+set_ppu_regs    lda #$00                ; reset PPU scroll
+                sta ppu_scroll
+                sta ppu_scroll
+                lda #%10100000          ; enable NMI, use 8*16-pixel sprites
+                sta ppu_ctrl
+                lda #%00011110          ; show sprites and background
+                sta ppu_mask
+                rts
 
 ; --- Interrupt vectors ---------------------------------------------------------------------------
 
