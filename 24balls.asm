@@ -50,8 +50,8 @@ blink_rate      equ   3  ; ball blink rate (0=fastest, 7=slowest)
                 ; see https://wiki.nesdev.org/w/index.php/INES
                 base $0000
                 db "NES", $1a            ; file id
-                db 1, 1                  ; 16 KiB PRG ROM, 8 KiB CHR ROM
-                db %00000000, %00000000  ; NROM mapper, horizontal name table mirroring
+                db 1, 0                  ; 16 KiB PRG ROM, 0 KiB CHR ROM (uses CHR RAM)
+                db %00000000, %00000000  ; NROM mapper, name table mirroring doesn't matter
                 pad $0010, $00           ; unused
 
 ; --- Initialization ------------------------------------------------------------------------------
@@ -157,6 +157,30 @@ reset           ; initialize the NES; see https://wiki.nesdev.org/w/index.php/In
                 cpx #4
                 bne -
 
+                ldy #$00                ; copy pattern table data
+                jsr set_ppu_addr_pg     ; 0 -> A; set PPU address page from Y
+                tax                     ; X = source index
+                ;
+-               lda pt_data,x           ; get byte using high nybble
+                pha
+                lsr a
+                lsr a
+                lsr a
+                lsr a
+                tay
+                lda pt_data_bytes,y
+                sta ppu_data
+                ;
+                pla                     ; get byte using low nybble
+                and #%00001111
+                tay
+                lda pt_data_bytes,y
+                sta ppu_data
+                ;
+                inx
+                cpx #($c*8)
+                bne -
+
                 ldy #$20                ; clear name & attribute table 0
                 jsr set_ppu_addr_pg     ; 0 -> A; set PPU address page from Y
                 ;
@@ -226,6 +250,38 @@ init_inv_dirs   ; balls that initially move right/down instead of left/up
                 hex e5 e9 ed f1 f7 fb e3 ea ef f3 f6 fd
 
 bg_palette      db col_bg0, col_bg1, col_bg2, col_bg3  ; 1st background subpalette
+
+pt_data         ; pattern table data; each nybble is an index to pt_data_bytes
+                ;
+                hex 00000000 00000000   ; tile $00 (color 0 only)
+                hex dddddddd dddddddd   ; tile $01 (color 3 only)
+                hex ddddaabb ddddddcc   ; tile $02 (border - top left corner)
+                hex dddd00dd dddddd00   ; tile $03 (border - top edge)
+                hex dddd2299 dddddd55   ; tile $04 (border - top right corner)
+                hex bbaadddd ccdddddd   ; tile $05 (border - bottom left corner)
+                hex dd00dddd 00dddddd   ; tile $06 (border - bottom edge)
+                hex 9922dddd 55dddddd   ; tile $07 (border - bottom right corner)
+                hex bbbbbbbb cccccccc   ; tile $08 (border - left edge)
+                hex 99999999 55555555   ; tile $09 (border - right edge)
+                hex 13476899 00123555   ; tile $0a (ball - top left)
+                hex 99867431 55532100   ; tile $0b (ball - bottom left)
+
+pt_data_bytes   ; actual pattern table data bytes; see pt_data
+                ;
+                db %00000000            ; index $0
+                db %00000111            ; index $1
+                db %00001111            ; index $2
+                db %00011111            ; index $3
+                db %00111000            ; index $4
+                db %00111111            ; index $5
+                db %01100011            ; index $6
+                db %01110000            ; index $7
+                db %11000111            ; index $8
+                db %11001111            ; index $9
+                db %11110000            ; index $a
+                db %11110011            ; index $b
+                db %11111100            ; index $c
+                db %11111111            ; index $d
 
 macro rle_run _y, _x, _length, _vertical, _tile
                 ; RLE run (see nt_rle_data)
@@ -418,9 +474,3 @@ set_ppu_regs    lda #$00                ; reset PPU scroll
 
                 pad $fffa, $ff
                 dw nmi, reset, irq      ; note: IRQ unused
-
-; --- CHR ROM -------------------------------------------------------------------------------------
-
-                base $0000
-                incbin "chr.bin"
-                pad $2000, $ff
