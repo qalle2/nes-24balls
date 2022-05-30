@@ -11,6 +11,8 @@ Table of contents:
 * `24balls.asm`: source code (assembles with [ASM6](https://github.com/qalle2/asm6))
 * `24balls.nes.gz`: assembled program (iNES format, gzip compressed)
 * `assemble.sh`: a Linux script that assembles the program (warning: deletes files)
+* `hexdump.py`: creates `hexdump.txt`
+* `hexdump.txt`: assembled program in hexadecimal
 * `snap.png`: screenshot
 
 ## Technical info
